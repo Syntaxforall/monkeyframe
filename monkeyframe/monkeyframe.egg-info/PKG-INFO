@@ -12,6 +12,8 @@ Requires-Python: >=3.8
 Description-Content-Type: text/markdown
 Requires-Dist: numpy>=1.20
 Requires-Dist: numba>=0.53
+Requires-Dist: pyarrow
+Requires-Dist: cython
 Dynamic: author
 Dynamic: author-email
 Dynamic: classifier

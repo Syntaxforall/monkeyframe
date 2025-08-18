@@ -1,42 +1,40 @@
 import numpy as np
 from .dataframe import DataFrame
 
-def _one_hot_method(df, cols, drop_first=False, prefix=None):
-    if isinstance(cols, str): cols = [cols]
-    out = {**df.data}
-    for c in cols:
-        cats = np.unique(df.data[c])
-        use = cats[1:] if drop_first else cats
-        for k in use:
-            name = f"{prefix or c}_{k}"
-            out[name] = (df.data[c] == k).astype(np.int8)
-    for c in cols:
-        out.pop(c, None)
-    return DataFrame(out)
+def label_encode(df, col):
+    series = df[col]
+    unique_values, codes = np.unique(series.data, return_inverse=True)
 
-def _label_encode_method(df, cols):
-    if isinstance(cols, str): cols = [cols]
-    out = {**df.data}
-    for c in cols:
-        u, inv = np.unique(df.data[c], return_inverse=True)
-        out[c] = inv.astype(np.int32)
-    return DataFrame(out)
+    new_df = df.copy()
+    new_df[col].data = codes
+    return new_df
 
-def _standardize_method(df, cols=None, with_mean=True, with_std=True, eps=1e-12):
+def one_hot(df, col):
+    series = df[col]
+    unique_values = np.unique(series.data)
+
+    new_df = df.copy()
+    for val in unique_values:
+        new_col_name = f"{col}_{val}"
+        new_df[new_col_name] = (series.data == val).astype(int)
+
+    return new_df.drop([col], axis=1)
+
+def standardize(df, cols=None):
     if cols is None:
-        cols = [c for c in df.columns if np.issubdtype(df.data[c].dtype, np.number)]
-    out = {**df.data}
-    for c in cols:
-        x = df.data[c].astype(np.float64, copy=False)
-        if with_mean:
-            m = np.nanmean(x)
-            x = x - m
-        if with_std:
-            s = np.nanstd(x, ddof=0)
-            x = x / (s + eps)
-        out[c] = x
-    return DataFrame(out)
+        cols = [c for c in df.columns if np.issubdtype(df[c].data.dtype, np.number)]
 
-DataFrame.one_hot = _one_hot_method
-DataFrame.label_encode = _label_encode_method
-DataFrame.standardize = _standardize_method
+    new_df = df.copy()
+    for col in cols:
+        series = new_df[col]
+        data = series.data
+        mean = np.mean(data)
+        std = np.std(data)
+        new_df[col].data = (data - mean) / std
+
+    return new_df
+
+# Monkey-patch
+DataFrame.label_encode = label_encode
+DataFrame.one_hot = one_hot
+DataFrame.standardize = standardize

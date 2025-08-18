@@ -1,9 +1,10 @@
 import numpy as np
 from .dataframe import DataFrame
+from .index import Index
 
 def _merge_col_values(df, other, col, left_idx, right_idx, is_left):
     source_df = df if is_left else other
-    arr = source_df.data[col]
+    arr = source_df[col].data
     out_col = np.empty(len(left_idx), dtype=arr.dtype)
 
     if arr.dtype.kind in "f":
@@ -19,20 +20,20 @@ def _merge_col_values(df, other, col, left_idx, right_idx, is_left):
     out_col[mask] = arr[indices[mask]]
     return out_col
 
-def _merge_method(df, other, on, how="inner", suffixes=("_x", "_y")):
+def merge(df, other, on, how="inner", suffixes=("_x", "_y")):
     if isinstance(on, list) and len(on) != 1:
         raise NotImplementedError("Only single-key merges supported for now")
     if isinstance(on, list):
         on = on[0]
 
-    left_key = df.data[on]
-    right_key = other.data[on]
+    left_key = df[on].data
+    right_key = other[on].data
 
     r_order = np.argsort(right_key, kind="mergesort")
     rk_sorted = right_key[r_order]
 
     left_pos = np.searchsorted(rk_sorted, left_key, side="left")
-    right_match = np.full(df.length, -1, dtype=np.int64)
+    right_match = np.full(len(df), -1, dtype=np.int64)
     mask = np.zeros_like(left_pos, dtype=bool)
     in_bounds = left_pos < rk_sorted.size
     mask[in_bounds] = rk_sorted[left_pos[in_bounds]] == left_key[in_bounds]
@@ -42,13 +43,13 @@ def _merge_method(df, other, on, how="inner", suffixes=("_x", "_y")):
         left_idx = np.where(right_match >= 0)[0]
         right_idx = right_match[left_idx]
     elif how == "left":
-        left_idx = np.arange(df.length)
+        left_idx = np.arange(len(df))
         right_idx = right_match
     elif how == "right":
         return other.merge(df, on=on, how="left", suffixes=suffixes[::-1])
     elif how == "outer":
         left_only_mask = right_match < 0
-        left_idx = np.arange(df.length)
+        left_idx = np.arange(len(df))
         right_idx = right_match
         right_unmatched = np.setdiff1d(np.arange(len(right_key)), right_match[right_match >= 0], assume_unique=True)
         if right_unmatched.size:
@@ -69,6 +70,15 @@ def _merge_method(df, other, on, how="inner", suffixes=("_x", "_y")):
             continue
         name = c + suffixes[1] if c in df.columns else c
         out[name] = _merge_col_values(df, other, c, left_idx, right_idx, is_left=False)
-    return DataFrame(out)
 
-DataFrame.merge = _merge_method
+    # Need to create a new index for the merged dataframe
+    if how in ('inner', 'left'):
+        new_index = df.index.data[left_idx]
+    else: # outer, right
+        # This is more complex, for now we just use a range index
+        new_index = None
+
+    return DataFrame(out, index=new_index)
+
+# Monkey-patch
+DataFrame.merge = merge

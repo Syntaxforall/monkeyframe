@@ -1,4 +1,5 @@
 from setuptools import setup, find_packages
+from setuptools_rust import Binding, RustExtension
 import os
 
 # Safely read the README.md file, or use a default if it doesn't exist
@@ -12,10 +13,18 @@ setup(
     name='monkeyframe',
     version='0.1.0',
     packages=find_packages(),
+    rust_extensions=[
+        RustExtension(
+            "monkeyframe.monkeyframe_rust_grouper_v3",
+            "monkeyframe/monkeyframe_rust_grouper_v3/Cargo.toml",
+            binding=Binding.PyO3,
+            optional=True)
+    ],
     install_requires=[
         'numpy>=1.20',
-        'numba>=0.53',
+        'pyarrow',
     ],
+    setup_requires=["setuptools-rust"],
     author='K.S.N.Ganesh',
     author_email='your.email@example.com',
     description='A fast, minimal DataFrame library for ML workflows.',
@@ -28,4 +37,5 @@ setup(
         'Operating System :: OS Independent',
     ],
     python_requires='>=3.8',
+    zip_safe=False,
 )

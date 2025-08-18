@@ -1,121 +1,76 @@
 import numpy as np
-from numba import njit
 from .dataframe import DataFrame
+from .index import Index
 
-# ==========================
-# Numba-optimized aggregation (CPU-safe)
-# ==========================
+try:
+    from .monkeyframe_rust_grouper_v3 import hash_grouper_rust_v3
+    RUST_GROUPER_AVAILABLE = True
+except ImportError:
+    RUST_GROUPER_AVAILABLE = False
 
-@njit
-def _groupby_mean(group_ids, numeric_data, num_groups):
-    n_rows, n_cols = numeric_data.shape
-    sums = np.zeros((num_groups, n_cols), dtype=np.float64)
-    counts = np.zeros(num_groups, dtype=np.float64)
+def groupby(self, by):
+    if not isinstance(by, str):
+        raise NotImplementedError("Only single column groupby is supported for now.")
 
-    for i in range(n_rows):
-        g = group_ids[i]
-        counts[g] += 1
-        for j in range(n_cols):
-            sums[g, j] += numeric_data[i, j]
+    key_col = self[by]
 
-    for g in range(num_groups):
-        if counts[g] > 0:
-            for j in range(n_cols):
-                sums[g, j] /= counts[g]
-
-    return sums
-
-
-@njit
-def _groupby_sum(group_ids, numeric_data, num_groups):
-    n_rows, n_cols = numeric_data.shape
-    sums = np.zeros((num_groups, n_cols), dtype=np.float64)
-
-    for i in range(n_rows):
-        g = group_ids[i]
-        for j in range(n_cols):
-            sums[g, j] += numeric_data[i, j]
-
-    return sums
-
-
-@njit
-def _groupby_count(group_ids, numeric_data, num_groups):
-    n_rows, n_cols = numeric_data.shape
-
-    if n_cols == 0:
-        counts_1d = np.zeros(num_groups, dtype=np.float64)
-        for i in range(n_rows):
-            g = group_ids[i]
-            counts_1d[g] += 1
-        return counts_1d.reshape(num_groups, 1)
-
-    counts = np.zeros((num_groups, n_cols), dtype=np.float64)
-    for i in range(n_rows):
-        g = group_ids[i]
-        for j in range(n_cols):
-            counts[g, j] += 1
-    return counts
-
-
-# ==========================
-# Groupby method
-# ==========================
-
-def _groupby_method(df, by_cols, agg="mean"):
-    if isinstance(by_cols, str):
-        by_cols = [by_cols]
-
-    # Encode keys -> integer codes
-    code_cols, uniques_per_col = [], []
-    for col in by_cols:
-        u, codes = np.unique(df.data[col], return_inverse=True)
-        uniques_per_col.append(u)
-        code_cols.append(codes.astype(np.int64))
-
-    codes_matrix = (
-        np.column_stack(code_cols) if len(code_cols) > 1
-        else code_cols[0].reshape(-1, 1)
-    )
-
-    unique_rows, group_ids = np.unique(codes_matrix, axis=0, return_inverse=True)
-    num_groups = unique_rows.shape[0]
-
-    numeric_cols = [
-        c for c in df.columns
-        if c not in by_cols and np.issubdtype(df.data[c].dtype, np.number)
-    ]
-    if numeric_cols:
-        numeric_data = np.column_stack([df.data[c] for c in numeric_cols]).astype(np.float64, copy=False)
+    if RUST_GROUPER_AVAILABLE and key_col.data.dtype.kind in 'OSU':
+        import pyarrow as pa
+        # The rust function expects a pyarrow array
+        arrow_array = pa.Array.from_pandas(key_col.data)
+        group_ids, unique_keys = hash_grouper_rust_v3(arrow_array)
+        unique_keys = np.array(unique_keys)
     else:
-        numeric_data = np.empty((df.length, 0), dtype=np.float64)
+        unique_keys, group_ids = np.unique(key_col.data, return_counts=False, return_inverse=True)
 
-    # Dispatch to correct aggregation kernel
-    if agg == "mean":
-        result_numeric = _groupby_mean(group_ids.astype(np.int64), numeric_data, num_groups)
-    elif agg == "sum":
-        result_numeric = _groupby_sum(group_ids.astype(np.int64), numeric_data, num_groups)
-    elif agg == "count":
-        result_numeric = _groupby_count(group_ids.astype(np.int64), numeric_data, num_groups)
-    else:
-        raise ValueError(f"Unknown aggregation: {agg}")
+    return GroupBy(self, by, group_ids, unique_keys)
 
-    # Construct result DataFrame
-    result_data = {}
-    for k, col in enumerate(by_cols):
-        result_data[col] = uniques_per_col[k][unique_rows[:, k]]
+class GroupBy:
+    def __init__(self, df, by, group_ids, unique_keys):
+        self.df = df
+        self.by = by
+        self.group_ids = np.array(group_ids)
+        self.unique_keys = unique_keys
+        self.num_groups = len(unique_keys)
 
-    # Add numeric results if any
-    if numeric_cols and result_numeric.shape[1] == len(numeric_cols):
-        for j, c in enumerate(numeric_cols):
-            result_data[c] = result_numeric[:, j]
-    elif agg == "count" and not numeric_cols:
-        result_data["count"] = result_numeric[:, 0]
+    def agg(self, agg_func):
+        if agg_func not in ['mean', 'sum', 'count']:
+            raise ValueError(f"Unsupported aggregation function: {agg_func}")
 
-    return DataFrame(result_data)
+        numeric_cols = [c for c, s in self.df._data.items() if np.issubdtype(s.data.dtype, np.number) and c != self.by]
 
+        if not numeric_cols:
+            if agg_func == 'count':
+                counts = np.bincount(self.group_ids)
+                return DataFrame({'count': counts}, index=Index(self.unique_keys, name=self.by))
+            else:
+                return DataFrame(index=Index(self.unique_keys, name=self.by))
 
-# ==========================
+        data_to_agg = self.df.to_numpy(columns=numeric_cols)
+
+        result_data = {}
+        for i, col_name in enumerate(numeric_cols):
+            result_col = np.empty(self.num_groups, dtype=np.float64)
+            for g in range(self.num_groups):
+                mask = self.group_ids == g
+                if agg_func == 'mean':
+                    result_col[g] = np.mean(data_to_agg[mask, i])
+                elif agg_func == 'sum':
+                    result_col[g] = np.sum(data_to_agg[mask, i])
+                elif agg_func == 'count':
+                    result_col[g] = np.sum(mask)
+            result_data[col_name] = result_col
+
+        return DataFrame(result_data, index=Index(self.unique_keys, name=self.by))
+
+    def mean(self):
+        return self.agg('mean')
+
+    def sum(self):
+        return self.agg('sum')
+
+    def count(self):
+        return self.agg('count')
+
 # Monkey-patch
-# ==========================
-DataFrame.groupby = _groupby_method
+DataFrame.groupby = groupby
